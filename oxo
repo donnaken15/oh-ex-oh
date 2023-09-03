@@ -249,9 +249,9 @@ upload() {
 			fs=$(curl -LIf "$1" | grep -E "^Content-Length: ")
 			fs=${fs:16}
 		} # why can't i do || with this
-		[ $? -eq 1 ] && {
-			echo "File '$1' does not exist."
-			return
+		[ $? -eq 1 -a ! -e "$1" ] && {
+			echo "File '$1' does not exist." >&2
+			return 1
 		}
 		[ -e "$1" -a $? -eq 1 ] && {
 			argbuilder+=(-F"file=@$1")
@@ -335,7 +335,9 @@ case "$mode" in
 	0)
 		typeset -a meta
 		meta=()
-		(upload "$file" "$exp" "$secret" "$dswitch" "$host") | while IFS=">>" read -r i t; do
+		res=$(upload "$file" "$exp" "$secret" "$dswitch" "$host")
+		[ $? -eq 1 ] && exit
+		echo "$res" | while IFS=">>" read -r i t; do
 			meta+=("${t:1}")
 		done
 		exp=$(date --date="${meta[1]}" +"%s")
