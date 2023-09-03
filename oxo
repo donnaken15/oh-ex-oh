@@ -7,13 +7,13 @@
 	echo "options:"
 	echo "    -e T        delete the file in T hours or delete"
 	echo "                on T (date/epoch timestamp*) after uploading"
-	echo "    -s          make accessing the uploaded file"
+	echo "    -s          make accessing the uploading file"
 	echo "                require a more secret link"
 	echo "    -d          don't save upload's management token"
 	echo "    -H,         change 0x0.st host (default: https://0x0.st)"
 	echo "    host=...    in oxocfg"
-	echo "    -i          interactive mode (ignores all other"
-	echo "                                  options besides host)"
+	#echo "    -i          interactive mode (ignores all other"
+	#echo "                                  options besides host)"
 	echo "    -?          display this help page"
 	echo "special filenames:"
 	#echo "    -           upload data from stdin"
@@ -24,6 +24,7 @@
 	echo "    these will only work if you didn't use -d for the"
 	echo "    file you uploaded and are going to manage"
 	echo "    -t T        manually input token T"
+	echo "                if not saved to config"
 	echo "    -e [T]      set the upload to be deleted in T hours"
 	echo "                or delete on T (date/epoch timestamp*),"
 	echo "                or don't specify T to get the expiry date"
@@ -51,25 +52,34 @@ nul=/dev/null
 	token=
 	exp=
 	file=
+	managemode=-1
 	while (($#)); do
 		case "$1" in
-			#-) # pipe
-			#	checkfile
-			#	file=/dev/stdin
-			#	;;
 			-*)
 				case "$1" in
 					# this has to be optimized
 					"-e") # expire argument
-						argcheck $# "$1"
-						exp="$2"
-						shift
+						[ $mode -eq 0 ] && {
+							argcheck $# "$1"
+							exp="$2"
+							shift
+						} || {
+							managemode=0
+							[ $2 -gt 0 ] 2>$nul && { # hack
+								exp="$2"
+								shift
+							}
+						}
 					;;
 					"-s") # secret link
 						secret=1
 					;;
 					"-d") # don't save token or delete upload
-						dswitch=1
+						[ $mode -eq 0 ] && {
+							dswitch=1
+						} || {
+							managemode=1
+						}
 					;;
 					"-H") # custom host
 						[ -n "$host" ] && {
@@ -137,6 +147,7 @@ trim() {
 	done
 	echo ${1[$i,$j]}
 }
+flist="oxof"
 nl=$'\n'
 __kv__() {
 	# key value getter
@@ -181,7 +192,6 @@ __skv__() {
 			} || file="${file}${nl}" # just because
 		done < "$f"
 		[ $got -eq 0 -a -n "$2" ] && {
-			echo a
 			file="${file}$(trim "$1") = $(trim "$2")${nl}"
 		}
 		echo "${file[0,-2]}" > "$f"
@@ -196,72 +206,150 @@ u_max_size=$((512*1024*1024))
 retention() {
 	echo $(( ${u_min_age} + (-(${u_max_age}) + ${u_min_age}) * (($1.0/${u_max_size} - 1)**3) ))
 }
-
-host=${host:-"$(kv host "https://0x0.st")"}
-
-[ -n "$file" ] && {
-	typeset -a argbuilder
-	argbuilder=()
-	[ $secret -eq 1 ] &&
-		argbuilder+=(-F\"secret=\")
-	[ -n "$exp" ] && {
-		hours=0
-		# stupid hacks to check time format or hours
-		[ $exp -gt 0 ] 2>$nul && {
-			[ $exp -gt 1650460320 ] && {
-				exp=$(date --date="@$exp")
-			} || {
-				hours=1
-			}
+toms() {
+	echo $(($1 * 24 * 60 * 60))
+}
+make_timestamp() {
+	# accepts hours, unix seconds, or date string
+	hours=0
+	# stupid hacks to check time format or hours
+	[ $1 -gt 0 ] 2>$nul && {
+		[ $1 -gt 1650460320 ] && {
+			ts=$(date --date="@$1")
 		} || {
-			[ $exp -eq 0 ] 2>$nul && {
-				exp=
-			} && {
-				echo $exp
-				exp=$(date --date="$exp")
-				[ $? -gt 0 ] && exit
-			}
+			hours=1
 		}
-		# definitely redundant
-		[ $hours -eq 0 ] && exp="$(date --date="$exp" +"%s")"
-		argbuilder+=("-F\"expires=$exp\"")
-	}
-	[ $dswitch -eq 0 ] && {
-		argbuilder+=(-D -)
-	}
-	[ "${file[0,7]}" = "http://" -o "${file[0,8]}" = "https://" ] && {
-		argbuilder+=(-F"url=$file")
-	#} || [ "$file" = "-" ] && {
-	#	#curl -F"file="
-	} # why can't i do || with this
-	[ -e "$file" -a $? -eq 1 ] && {
-		#[ "$file" != "/dev/stdin" ] && {
-			argbuilder+=(-F"file=@$file")
-		# NOT WORKING
-		#} || {
-		#	[ -t 0 ] && echo Press Ctrl-D to finish input.
-		#	argbuilder+=(--form-string "file=test why isn't this working")
-		#}
-		(exit 0)
 	} || {
-		echo "File '$file' does not exist."
+		[ $1 -eq 0 ] 2>$nul && {
+			ts=
+		} || {
+			ts=$(date --date="$1")
+			[ $? -gt 0 ] && return 1
+		}
 	}
-	
-	(curl -f ${argbuilder[@]} -o - "$host" --progress-bar | grep -E "^(X-Expires|X-Token|$host)" | sed 's/\r$//') | while read -r t; do
-		case "${t:0:9}" in
-			"X-Expires")
-				exp=$(date --date="@$((${t:11} / 1000))")
+	[ $hours -eq 0 ] && echo "$(date --date="$ts" +"%s")" || echo $1
+	return 0
+}
+upload() {
+	[ -n "$1" ] && {
+		typeset -a argbuilder
+		argbuilder=()
+		[ ${3:-0} -eq 1 ] &&
+			argbuilder+=(-F\"secret=\")
+		[ -n "$2" ] && {
+			exp=$(make_timestamp "$2")
+			[ $? -gt 0 ] && return 1
+			argbuilder+=("-F\"expires=$2\"")
+		}
+		[ ${4:-0} -eq 0 ] && {
+			argbuilder+=(-D -)
+		}
+		[ "${1[0,7]}" = "http://" -o "${1[0,8]}" = "https://" ] && {
+			argbuilder+=(-F"url=$1")
+			fs=$(curl -LIf "$1" | grep -E "^Content-Length: ")
+			fs=${fs:16}
+		} # why can't i do || with this
+		[ $? -eq 1 ] && {
+			echo "File '$1' does not exist."
+			return
+		}
+		[ -e "$1" -a $? -eq 1 ] && {
+			argbuilder+=(-F"file=@$1")
+			fs=$(wc -c "$1" | cut -d' ' -f1)
+		}
+		h="${5:-"https://0x0.st"}"
+		(curl -Lf ${argbuilder[@]} -o - "$h" --progress-bar |
+			grep -E "^(X-Expires|X-Token|$h)" | sed 's/\r$//') | while read -r t; do
+			case "${t:0:9}" in
+				"X-Expires")
+					exp=$(date --date="@$((${t:11} / 1000))")
+					;;
+				"X-Token: ")
+					token=${t:9}
+					;;
+				"${h:0:9}")
+					_path=${t}
+					;;
+			esac
+		done
+		echo "0>>${exp:-$(date --date="@$(($(date +"%s") + $(toms $(retention $fs))))")}" # off by a few seconds
+		echo "1>>$token"
+		echo "2>>$_path"
+	}
+}
+manage() {
+	[ -n "$1" ] && {
+		setexpiry=0
+		typeset -a argbuilder
+		argbuilder=()
+		h="${5:-"https://0x0.st"}"
+		case "$3" in
+			0)
+				[ -z "$4" ] && {
+					fs=0
+					exp=
+					(curl -LfIsS "$h/$1" |
+						grep -E "^(Last-Modified|Content-Length)" | sed 's/\r$//') | while read -r t; do
+						case "${t:0:13}" in
+							"Last-Modified")
+								lm="$(date --date="${t:15}" +"%s")"
+								;;
+							"Content-Lengt")
+								fs="${t:16}"
+								;;
+						esac
+					done
+					exp=$(($(printf "%.0f\n" "$(($lm + $(toms $(retention $fs))))")))
+					echo "Deletion date (estimated):" >&2
+					#date --date=@$exp >&2
+					echo $exp
+					return
+				} || {
+					[ "$2" = "null" ] && {
+						echo "Invalid or missing token"
+						return 1
+					}
+					curl -Lf -F"token=$2" -Fexpires=$exp "$h/$1"
+				}
 				;;
-			"X-Token: ")
-				token=${t:9}
+			1)
+				[ "$2" = "null" ] && {
+					echo "Invalid or missing token"
+					return 1
+				}
+				curl -Lf -F"token=$2" -Fdelete= "$h/$1"
+				skv "${1}_exp" "" "$flist"
+				skv "${1}_token" "" "$flist"
+				skv "${1}_host" "" "$flist"
 				;;
-			"${host:0:9}")
-				path=${t}
+			*)
+				echo "Invalid mode $3"
+				return 1
 				;;
 		esac
-	done
-	echo Expires $exp
-	echo Token $token
-	echo Path $path
+	}
 }
+host="${host:-"$(kv host "https://0x0.st")"}"
+
+case "$mode" in
+	0)
+		typeset -a meta
+		meta=()
+		(upload "$file" "$exp" "$secret" "$dswitch" "$host") | while IFS=">>" read -r i t; do
+			meta+=("${t:1}")
+		done
+		exp=$(date --date="${meta[1]}" +"%s")
+		token="${meta[2]}"
+		id="${meta[3]:$((${#host}+1))}"
+		skv "${id}_exp" "$exp" "$flist"
+		[ -n "$token" ] && {
+			skv "${id}_token" "$token" "$flist"
+		}
+		skv "${id}_host" "$host" "$flist"
+		echo $host/$id
+		;;
+	1)
+		manage "$file" "${token:-"$(kv "${file}_token" null "$flist")"}" "$managemode" "$exp"
+		;;
+esac
 
